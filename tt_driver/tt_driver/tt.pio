@@ -1,0 +1,85 @@
+; PIO program to send a byte, optionally selecting scan first
+; and optionally latching.
+; Input format is:
+;  - 1 bit: Scan select, scans if 1.
+;  - 1 bit: Latch enable, latches if 1.
+;  - 8 bits: The byte
+; Input must be left aligned.
+;
+; Output pin is data pin
+; Side-set pins are: clock, latch_en, scan_select (high to low)
+.program tt_out
+.side_set 3
+top:
+    out x, 1                side 0b000  ; Read scan_select
+    jmp !x, no_scan         side 0b000
+
+    nop                     side 0b001 [1] ; Scan select
+    nop                     side 0b101 [1]
+
+no_scan:
+    out x, 1                side 0b000  ; Read latch enable
+    set y, 6                side 0b000  ; Will write 7 bits, then latch bit separately
+    irq wait 4              side 0b000  ; Notify read SM we are about to start
+
+send_data:
+    out pins, 1             side 0b000 [1]
+    jmp y--, send_data      side 0b100 [1]
+
+    jmp !x, no_latch        side 0b000
+    out pins, 1             side 0b010 [1]
+    jmp top                 side 0b110 [1]
+
+no_latch:
+    out pins, 1             side 0b000 [1]
+    jmp top                 side 0b100 [1]
+
+; PIO Program to read a byte, synchronized with the output program above to ignore scans
+; Input pin is data, clock must be data pin + 1
+.program tt_in
+top:
+    set y, 6        ; Will read 8 bits
+    wait 1 irq 4    ; Wait for output SM to start writing
+    wait 0 pin 1
+    in pins, 1
+
+read_loop:
+    wait 1 pin 1
+    in pins, 1
+    jmp y--, read_loop
+
+% c-sdk {
+void tt_out_program_init(PIO pio, uint sm, uint offset, uint data_pin, uint scan_pin) {
+    pio_gpio_init(pio, data_pin);
+    pio_gpio_init(pio, scan_pin);
+    pio_gpio_init(pio, scan_pin + 1);
+    pio_gpio_init(pio, scan_pin + 2);
+    pio_sm_set_consecutive_pindirs(pio, sm, scan_pin, 3, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 1, true);
+
+    pio_sm_config c = tt_out_program_get_default_config(offset);
+    sm_config_set_out_pins(&c, data_pin, 1);
+    sm_config_set_out_shift(&c, false, true, 10);
+    sm_config_set_sideset_pins(&c, scan_pin);
+    sm_config_set_clkdiv(&c, 1.f);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+void tt_in_program_init(PIO pio, uint sm, uint offset, uint data_pin) {
+    pio_gpio_init(pio, data_pin);
+    pio_gpio_init(pio, data_pin + 1);
+    pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 2, false);
+
+    pio_sm_config c = tt_in_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, data_pin);
+    sm_config_set_in_shift(&c, false, true, 8);
+    sm_config_set_clkdiv(&c, 1.f);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
